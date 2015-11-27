@@ -8,7 +8,7 @@ def processArguments():
     parser.add_argument(
             '-p',
             '--port',
-            required=True,
+            default='/dev/ttyUSB0',
             help='serial port name (/dev/ttyS0)')
 
     parser.add_argument(
@@ -137,12 +137,6 @@ def getUInt(data):
 
 def getInt(data):
     return int.from_bytes(data, byteorder='big', signed=True)
-
-def getNumber(data, signed):
-    if signed:
-        return getInt(data)
-    else:
-        return getUInt(data)
 
 def getFloat(data):
     mantissa = getInt(data[0:2])
@@ -319,7 +313,7 @@ def waveform(port, source):
     y_zero = getFloat(data[15:18])
     waveform.x_zero = getFloat(data[18:21])
     y_resolution = getFloat(data[21:24])
-    x_resolution = getFloat(data[24:27])
+    waveform.delta_x = getFloat(data[24:27])
     waveform.y_at_0 = getFloat(data[27:30])
     waveform.x_at_0 = getFloat(data[30:33])
     waveform.timestamp = datetime.datetime(
@@ -349,7 +343,9 @@ def waveform(port, source):
     print("done")
     print("Processing waveform sample data from ScopeMeter...", end="", flush=True)
 
-    sample_signed = (data[0]&0b10000000 != 0)
+    getNumber = getUInt
+    if data[0]&0b10000000 != 0:
+        getNumber = getInt
     sample_size =    data[0]&0b00000111
     samples_per_sample = 1
 
@@ -364,11 +360,11 @@ def waveform(port, source):
             samples_per_sample = 2
 
     pointer = 1
-    overload = getNumber(data[pointer:pointer+sample_size], sample_signed)
+    overload = getNumber(data[pointer:pointer+sample_size])
     pointer += sample_size
-    underload = getNumber(data[pointer:pointer+sample_size], sample_signed)
+    underload = getNumber(data[pointer:pointer+sample_size])
     pointer += sample_size
-    invalid = getNumber(data[pointer:pointer+sample_size], sample_signed)
+    invalid = getNumber(data[pointer:pointer+sample_size])
     pointer += sample_size
     nbr_of_samples = getUInt(data[pointer:pointer+2])
     pointer += 2
@@ -377,9 +373,7 @@ def waveform(port, source):
     
     for i in range(nbr_of_samples):
         for j in range(samples_per_sample):
-            sample = getNumber(
-                    data[pointer:pointer+sample_size],
-                    sample_signed)
+            sample = getNumber(data[pointer:pointer+sample_size])
             if sample == overload:
                 waveform.samples[i][j] = numpy.inf
             elif sample == underload:
@@ -438,20 +432,26 @@ def execute(arguments, port):
                 if matching:
                     data.samples = numpy.resize(
                             data.samples,
-                            data.samples.shape[0])
+                            (data.samples.shape[0], 1))
                     data.trace_type = "Average"
                 else:
                     data.trace_type = "Glitch"
             else:
                 data.trace_type = trace_type
-            waveforms += data
+            waveforms.append(data)
 
-            filename=datetime.strftime("%Y-%m-%d-%H-%M-%S", data.timestamp) \
+            filename=data.timestamp.strftime("%Y-%m-%d-%H-%M-%S") \
                     + "_input-" + data.channel \
-                    + "_" + data.trace_type.lowercase() \
+                    + "_" + data.trace_type.lower() \
                     + "_" + data.x_unit + "-vs-" + data.y_unit \
                     + ".dat"
             datFile = open(filename, 'w')
+            for i in range(data.samples.shape[0]):
+                datFile.write("{:.5e}".format(data.x_zero+i*data.delta_x))
+                for j in range(data.samples.shape[1]):
+                    datFile.write(" {:.5e}".format(data.samples[i][j]))
+                datFile.write("\n")
+            datFile.close()
 
 arguments = processArguments()
 port = initializePort(arguments.port)
