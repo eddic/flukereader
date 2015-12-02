@@ -282,6 +282,43 @@ units = [
         "VAR",
         "VA"]
 
+types = [
+        None,
+        "Mean",
+        "RMS",
+        "True RMS",
+        "Peak to Peak",
+        "Peak Maximum",
+        "Peak Minimum",
+        "Crest Factor",
+        "Period",
+        "Duty Cycle Negative",
+        "Duty Cycle Positive",
+        "Frequency",
+        "Pulse Width Negative",
+        "Pulse Width Positive",
+        "Phase",
+        "Diode",
+        "Continuity",
+        None,
+        "Reactive Power",
+        "Apparent Power",
+        "Real Power",
+        "Harmonic Reactive Power",
+        "Harmonic Apparent Power",
+        "Harmonic Real Power",
+        "Harmonic RMS",
+        "Displacement Power Factor",
+        "Total Power Factor",
+        "Total Harmonic Distortion",
+        "Total Harmonic Distortion with respect to Fundamental",
+        "K Factor (European)",
+        "K Factor (US)",
+        "Line Frequency",
+        "Vac PWM or Vac+dc PWM",
+        "Rise Time",
+        "Fall Time"]
+
 def waveform(port, source):
     print("Downloading waveform admin data from ScopeMeter...", end="", flush=True)
     sendCommand(port, "QW "+source)
@@ -390,6 +427,19 @@ def waveform(port, source):
     print("done")
 
     return waveform
+
+class measurement_t:
+    source = ""
+    units = ""
+    value = 0.0
+    name = ""
+
+def measurements(port)
+    print("Downloading measurement data from ScopeMeter...", end="", flush=True)
+    sendCommand(port, "QM")
+
+    size = 
+    data = port.read(size)
 
 def execute(arguments, port):
     if arguments.identify:
