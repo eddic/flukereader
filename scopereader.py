@@ -1,6 +1,6 @@
 #! /usr/bin/env python3
 
-import argparse, serial, time, datetime, scipy, numpy, binascii
+import argparse, serial, time, datetime, scipy, numpy, binascii, math
 
 def processArguments():
     parser = argparse.ArgumentParser(description='Talk to a Fluke ScopeMeter.')
@@ -28,6 +28,12 @@ def processArguments():
             '--screenshot',
             action='store_true',
             help='get a screenshot from the ScopeMeter')
+
+    parser.add_argument(
+            '-m',
+            '--measurement',
+            action='store_true',
+            help='get a measurement from the ScopeMeter')
 
     parser.add_argument(
             '-w', '--waveform',
@@ -142,7 +148,7 @@ def getFloat(data):
     mantissa = getInt(data[0:2])
     exponent = getInt(data[2:3])
 
-    return float(mantissa * 10**exponent)
+    return float(mantissa * 10.0**exponent)
 
 def getHeader(port, intSize):
     dataSize = 3+intSize
@@ -170,6 +176,42 @@ def getData(port, size):
         exit(1)
     return data[:-1]
 
+def getDecimal(port, sep=False):
+    # Now get the number
+    number = ""
+    floating = False
+    while True:
+        byte = port.read()
+        if len(byte) != 1:
+            print("error: data length reception timed out")
+            exit(1)
+        byte = byte[0]
+        if (ord('0') > byte or byte > ord('9')) \
+                and byte != ord('.') \
+                and byte != ord('+') \
+                and byte != ord('-'):
+            break;
+        if byte == ord('.'):
+            floating = True
+        number += chr(byte)
+
+    separator = byte
+
+    if len(number) == 0:
+        return None
+
+    if floating:
+        number = float(number)
+    else:   
+        number = int(number)
+
+    if sep != False:
+        if ord(sep) != separator:
+            print("error: invalid field separator after decimal")
+            exit(1)
+        return number
+    return (number, separator)
+
 def checksum(data, check):
     checksum = 0
     for byte in data:
@@ -182,16 +224,7 @@ def screenshot(port):
     print("Downloading screenshot from ScopeMeter...", end="", flush=True)
     sendCommand(port, "QP 0,12,B")
     
-    dataLength=""
-    while True:
-        byte = port.read()
-        if len(byte) != 1:
-            print("error: data length reception timed out")
-            exit(1)
-        if byte[0] == ord(','):
-            dataLength = int(dataLength)
-            break;
-        dataLength += chr(byte[0])
+    dataLength = getDecimal(port, ',')
 
     image = bytearray()
     status = 0
@@ -281,43 +314,6 @@ units = [
         "dBW",
         "VAR",
         "VA"]
-
-types = [
-        None,
-        "Mean",
-        "RMS",
-        "True RMS",
-        "Peak to Peak",
-        "Peak Maximum",
-        "Peak Minimum",
-        "Crest Factor",
-        "Period",
-        "Duty Cycle Negative",
-        "Duty Cycle Positive",
-        "Frequency",
-        "Pulse Width Negative",
-        "Pulse Width Positive",
-        "Phase",
-        "Diode",
-        "Continuity",
-        None,
-        "Reactive Power",
-        "Apparent Power",
-        "Real Power",
-        "Harmonic Reactive Power",
-        "Harmonic Apparent Power",
-        "Harmonic Real Power",
-        "Harmonic RMS",
-        "Displacement Power Factor",
-        "Total Power Factor",
-        "Total Harmonic Distortion",
-        "Total Harmonic Distortion with respect to Fundamental",
-        "K Factor (European)",
-        "K Factor (US)",
-        "Line Frequency",
-        "Vac PWM or Vac+dc PWM",
-        "Rise Time",
-        "Fall Time"]
 
 def waveform(port, source):
     print("Downloading waveform admin data from ScopeMeter...", end="", flush=True)
@@ -433,13 +429,197 @@ class measurement_t:
     units = ""
     value = 0.0
     name = ""
+    precision = 0.0
+    sigdigs = 0
 
-def measurements(port)
-    print("Downloading measurement data from ScopeMeter...", end="", flush=True)
+def si(number, significantDigits, unit):
+    def prefix(degree):
+        posPrefixes = ['', 'k', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y']
+        negPrefixes = ['', 'm', 'μ', 'n', 'p', 'f', 'a', 'z', 'y']
+
+        if degree < 0:
+            return negPrefixes[-degree]
+        else:
+            return posPrefixes[degree]
+
+    def degree(number):
+        if number == 0:
+            return 0
+
+        number = abs(number)
+
+        return int(math.floor(math.log10(number)/3))
+
+    degree_var = degree(number)
+    number = float(number) / (1000.0 ** degree_var)
+    if number == 0:
+        precision = significantDigits - 1
+    else:
+        precision = significantDigits - (int(math.floor(math.log10(math.fabs(number))))+1)
+    if precision<0:
+        precision=0
+
+    return "{1:.{0:d}f} {2:s}{3:s}".format(precision, number, prefix(degree_var), unit)
+
+def formatSeconds(seconds):
+    totalSeconds=seconds;
+
+    days=int(math.floor(seconds/(60*60*24)))
+    seconds=seconds-days*60*60*24;
+    hours=int(math.floor(seconds/(60*60)))
+    seconds=seconds-hours*60*60;
+    minutes=int(math.floor(seconds/60))
+    seconds=seconds-minutes*60;
+
+    output=""
+    if days>0:
+        output="{:d} days, ".format(days)
+    if hours>0:
+        output=output+"{:d} hours, ".format(hours)
+    if minutes>0:
+        output=output+"{:d} minutes, ".format(minutes)
+    
+    output=output+"{:.3f} seconds".format(seconds)
+    if totalSeconds>=60:
+        output=output+" ({:.3f} seconds)".format(totalSeconds)
+    return output
+
+def measurement(port):
+    input("*** Setup your measurement and press enter when ready ***")
+
+    print("Downloading measurement metadata from ScopeMeter...", end="", flush=True)
     sendCommand(port, "QM")
 
-    size = 
-    data = port.read(size)
+    types = [
+            None,
+            "Mean",
+            "RMS",
+            "True RMS",
+            "Peak to Peak",
+            "Peak Maximum",
+            "Peak Minimum",
+            "Crest Factor",
+            "Period",
+            "Duty Cycle Negative",
+            "Duty Cycle Positive",
+            "Frequency",
+            "Pulse Width Negative",
+            "Pulse Width Positive",
+            "Phase",
+            "Diode",
+            "Continuity",
+            None,
+            "Reactive Power",
+            "Apparent Power",
+            "Real Power",
+            "Harmonic Reactive Power",
+            "Harmonic Apparent Power",
+            "Harmonic Real Power",
+            "Harmonic RMS",
+            "Displacement Power Factor",
+            "Total Power Factor",
+            "Total Harmonic Distortion",
+            "Total Harmonic Distortion with respect to Fundamental",
+            "K Factor (European)",
+            "K Factor (US)",
+            "Line Frequency",
+            "Vac PWM or Vac+dc PWM",
+            "Rise Time",
+            "Fall Time"]
+
+    nos = {
+            11: "Reading 1",
+            21: "Reading 2",
+            31: "Reading 3",
+            41: "Reading 4",
+            61: "Cursor 1 Amplitude",
+            62: "Cursor Relative Amplitude",
+            71: "Cursor 2 Amplitude",
+            72: "Cursor Relative Time",
+            73: "Cursor Maximum Amplitude",
+            74: "Cursor Average Amplitude",
+            75: "Cursor Minimum Amplitude",
+            76: "Cursors Frequency"}
+
+    sources = {
+            1: "Input A",
+            2: "Input B",
+            3: "Input C",
+            4: "Input D",
+            5: "External Input",
+            12: "Input A vs Input B",
+            21: "Input B vs Input A"}
+
+    class reading_t:
+        no = 0
+        valid = False
+        source = 0
+        unit = 0
+        thetype = 0
+        pres = 0
+        resolution = 0.0
+
+    readings = []
+    separator = ord(',')
+
+    while separator == ord(','):
+        reading = reading_t()
+        reading.no = getDecimal(port, ',')
+        if getDecimal(port, ',') == 1:
+            reading.valid = True
+        reading.source = getDecimal(port, ',')
+        reading.unit = getDecimal(port, ',')
+        reading.thetype = getDecimal(port, ',')
+        reading.pres = getDecimal(port, ',')
+        
+        mantissa = getDecimal(port, 'E')
+        exponent, separator = getDecimal(port)
+        reading.resolution = mantissa * 10.0**exponent
+
+        if reading.valid:
+            readings.append(reading)
+    print("done\n")
+
+    letter = ord('a')
+    for reading in readings:
+        print(" ({}) {}".format(chr(letter), nos[reading.no]))
+        print("     Source: {}".format(sources[reading.source]))
+        print("       Type: {}".format(types[reading.thetype]))
+        print("       Unit: {}".format(units[reading.unit]))
+        print("  Precision: {}".format(si(
+            reading.resolution,
+            3,
+            units[reading.unit])))
+        letter += 1
+    desired = input("Enter desired measurements (a) and hit enter: ")
+    desired = desired.lower()
+    desired = desired[0]
+
+    if ord('a') > ord(desired) or ord(desired) >= ord('a')+len(readings):
+        print("error: answer is out of range")
+        exit(1)
+
+    reading = readings[ord(desired)-ord('a')]
+    measurement = measurement_t()
+    measurement.source = sources[reading.source]
+    measurement.unit = units[reading.unit]
+    measurement.precision = reading.resolution
+
+    print("Fetching measurement from ScopeMeter...", end="", flush=True)
+    sendCommand(port, "QM {:d}".format(reading.no))
+    measurement.value = getDecimal(port, 'E') * 10.0**getDecimal(port, '\r')
+    print("done")
+
+    if measurement.value == 0:
+        measurement.sigdigs = 1
+    else:
+        measurement.sigdigs = math.ceil(
+                math.ceil(math.log10(measurement.value))
+                -math.log10(reading.resolution))\
+                +1
+    print("Result: {} ± {}".format(
+        si(measurement.value, measurement.sigdigs, measurement.unit),
+        si(measurement.precision, 3, measurement.unit)))
 
 def execute(arguments, port):
     if arguments.identify:
@@ -502,6 +682,9 @@ def execute(arguments, port):
                     datFile.write(" {:.5e}".format(data.samples[i][j]))
                 datFile.write("\n")
             datFile.close()
+
+    if arguments.measurement:
+        measurement(port)
 
 arguments = processArguments()
 port = initializePort(arguments.port)
