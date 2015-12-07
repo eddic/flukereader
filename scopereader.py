@@ -1,6 +1,6 @@
 #! /usr/bin/env python3
 
-import argparse, serial, time, datetime, scipy, numpy, binascii, math
+import argparse, serial, time, datetime, scipy.signal, numpy, binascii, math, copy
 
 def processArguments():
     parser = argparse.ArgumentParser(description='Talk to a Fluke ScopeMeter.')
@@ -37,14 +37,7 @@ def processArguments():
 
     parser.add_argument(
             '-w', '--waveform',
-            choices=[
-                'A_TRACE',
-                'A_ENVELOPE',
-                'A_TREND',
-                'B_TRACE',
-                'B_ENVELOPE',
-                'B_TREND'],
-            action='append',
+            action='store_true',
             help='capture waveform data')
 
     arguments = parser.parse_args()
@@ -290,6 +283,8 @@ class waveform_t:
     timestamp = None
     samples = None
     averaged = False
+    filename = ""
+    title = ""
 
 units = [
         None,
@@ -373,6 +368,10 @@ def waveform(port, source):
     #    exit(1)
     data = getData(port, size)
 
+    terminator = port.read(1)
+    if len(terminator) != 1 and terminator[0] != ord('\r'):
+        print("error: got invalid terminator to trace data")
+
     print("done")
     print("Processing waveform sample data from ScopeMeter...", end="", flush=True)
 
@@ -424,15 +423,184 @@ def waveform(port, source):
 
     return waveform
 
+def waveforms(port):
+    waveforms = []
+
+    waveform_type = -1
+    while waveform_type<0 or waveform_type>9:
+        print(" (a) single trace")
+        print(" (b) single psd")
+        print(" (c) single envelope")
+        print(" (d) single trend")
+        print(" (e) dual trace")
+        print(" (f) dual psd")
+        print(" (g) dual envelope")
+        print(" (h) dual trend")
+        print(" (i) dual power")
+        print(" (j) quit")
+        waveform_type = input("What type of waveform will this be? ")
+        waveform_type = ord(waveform_type[0])-ord('a')
+    if waveform_type == 9:
+        return;
+    waveform_count = 1
+    if waveform_type > 3:
+        waveform_count = 2
+    
+    trace_type = ""
+    source = "0"
+    if waveform_type%4<2:
+        source += '0'
+        if waveform_type == 8:
+            trace_type = 'power'
+        elif waveform_type%4==1:
+            trace_type = 'psd'
+        else:
+            trace_type = 'trace'
+    elif waveform_type%4==2:
+        source += '2'
+        trace_type = 'envelope'
+    elif waveform_type%4==3:
+        source += '1'
+        trace_type = 'trend'
+
+    # Let's get our raw waveforms
+    for waveform_number in range(waveform_count):
+        source = "{:d}{:s}".format(waveform_number+1, source[1])
+
+        data = waveform(port, source)
+        data.channel = chr(ord('A')+waveform_number)
+        if waveform_type%4<2:
+            if data.samples.shape[1] == 2:
+                matching = True
+                for i in data.samples:
+                    if i[0] != i[1]:
+                        matching = False
+                        break
+                if matching:
+                    data.samples = numpy.resize(
+                            data.samples,
+                            (data.samples.shape[0], 1))
+                    data.trace_type = "average"
+                else:
+                    data.trace_type = "glitch"
+            else:
+                data.trace_type = "trace"
+        else:
+            data.trace_type = trace_type
+        waveforms.append(data)
+
+    # We are doing a dual channel power calculation
+    if waveform_type == 5 or waveform_type == 8:
+        if waveforms[0].timestamp != waveforms[0].timestamp:
+            print("error: timestamp of waveforms does not match for power")
+            exit(1)
+        if waveforms[0].y_unit != 'V' or waveforms[1].y_unit != 'A':
+            print("error: waveform units are incorrect for power")
+            exit(1)
+        if waveforms[0].trace_type != waveforms[1].trace_type:
+            print("error: trace types do not match for power")
+            exit(1)
+        if waveforms[0].samples.shape[1] != 1 \
+                or waveforms[1].samples.shape[1] != 1:
+            print("error: cannot do power with glitch on")
+            exit(1)
+        data = waveform_t()
+        data.channel = "both"
+        if waveforms[0].trace_type != 'trace':
+            data.trace_type = waveforms[0].trace_type + ' '
+        data.trace_type += "power"
+        data.y_unit = "W"
+        data.x_unit = waveforms[0].x_unit
+        data.y_divisions = waveforms[0].y_divisions
+        data.x_divisions = waveforms[0].x_divisions
+        data.y_scale = waveforms[0].y_scale * waveforms[0].y_scale
+        data.x_scale = waveforms[0].x_scale
+        data.x_zero = waveforms[0].x_zero
+        data.y_at_0 = waveforms[0].y_at_0 * waveforms[1].y_at_0
+        data.x_at_0 = waveforms[0].x_at_0
+        data.delta_x = waveforms[0].delta_x
+        data.timestamp = waveforms[0].timestamp
+        data.samples = waveforms[0].samples
+        for i in range(data.samples.shape[0]):
+            data.samples[i] = waveforms[0].samples[i] * waveforms[1].samples[i]
+        data.averaged = waveforms[0].averaged
+        waveforms.clear()
+        waveforms.append(data)
+
+    # We are doing a power spectral density analysis
+    if waveform_type%4 == 1:
+        if waveform_type == 5:
+            # Our values are in Watts here
+            for i in data.samples[0]:
+                i = math.sqrt(abs(i))
+
+        x = numpy.empty(waveforms[0].samples.shape[0])
+        for i in range(x.shape[0]):
+            x[i] = waveforms[0].samples[i][0]
+        frequency, power = scipy.signal.welch(
+                x = x,
+                fs = waveforms[0].delta_x,
+                window = "hamming",
+                nperseg = 1024,
+                return_onesided = True)
+        
+        data = waveform_t()
+        data.trace_type = 'psd'
+        if waveforms[0].y_unit == 'W':
+            data.y_unit = 'W/Hz'
+            data.channel = 'both'
+        else:
+            data.y_unit = 'V²/Hz'
+            data.channel = 'A'
+        data.x_unit = 'Hz'
+        data.y_division = None
+        data.x_division = None
+        data.y_scale = None
+        data.x_scale = None
+        data.x_zero = frequency[0]
+        data.y_at_0 = None
+        data.x_at_0 = None
+        data.delta_x = (frequency[-1]-frequency[0])/(len(frequency)-1)
+        data.timestamp = waveforms[0].timestamp
+        data.samples = numpy.empty([power.shape[0], 1])
+        for i in range(power.shape[0]):
+            data.samples[i][0] = power[i]
+        waveforms.clear()
+        waveforms.append(data)
+
+    for data in waveforms:
+        data.filename=data.timestamp.strftime("%Y-%m-%d-%H-%M-%S") \
+                + "_input-" + data.channel \
+                + "_" + data.trace_type.lower().replace(' ', '-') \
+                + "_" + data.x_unit + "-vs-" + data.y_unit.replace('/', 'per') \
+                + ".dat"
+        datFile = open(data.filename, 'w')
+        for i in range(data.samples.shape[0]):
+            datFile.write("{:.5e}".format(data.x_zero+i*data.delta_x))
+            for j in range(data.samples.shape[1]):
+                datFile.write(" {:.5e}".format(data.samples[i][j]))
+            datFile.write("\n")
+        datFile.close()
+
+        print("***** Waveform Details *****")
+        print("   Channel: {:s}".format(data.channel))
+        print("Trace Type: {:s}".format(data.trace_type))
+        print("     Units: {:s} vs {:s}".format(data.x_unit, data.y_unit))
+        print(data.timestamp.strftime(" Timestamp: %H:%M:%S on %B %d, %Y"))
+        print("      Size: {:d}".format(data.samples.shape[0]))
+        print("  Filename: {:s}".format(data.filename))
+        data.title = input("Enter desired title: ")
+
+    return waveforms
+
 class measurement_t:
     source = ""
     units = ""
     value = 0.0
     name = ""
     precision = 0.0
-    sigdigs = 0
 
-def si(number, significantDigits, unit):
+def si(number, precision, unit):
     def prefix(degree):
         posPrefixes = ['', 'k', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y']
         negPrefixes = ['', 'm', 'μ', 'n', 'p', 'f', 'a', 'z', 'y']
@@ -443,23 +611,51 @@ def si(number, significantDigits, unit):
             return posPrefixes[degree]
 
     def degree(number):
-        if number == 0:
-            return 0
-
         number = abs(number)
 
         return int(math.floor(math.log10(number)/3))
+    
+    if precision != 0:
+        precision = math.ceil(
+                precision 
+                /10.0**math.floor(math.log10(precision))) \
+            *10.0**math.floor(math.log10(precision))    
 
-    degree_var = degree(number)
-    number = float(number) / (1000.0 ** degree_var)
-    if number == 0:
-        precision = significantDigits - 1
+    significantDigits = 0
+    decimalPoints = 0
+    degree_var = 0
+    if number != 0:
+        degree_var = degree(number)
+        if precision != 0:
+            significantDigits = \
+                    math.floor(math.log10(number)) \
+                    -math.floor(math.log10(precision)) \
+                    +1
+            significantDigits -= int(
+                    math.floor(
+                        math.log10(
+                            math.fabs(number/(1000.0 ** degree_var))
+                        )))+1
+            if significantDigits<0:
+                significantDigits=0
     else:
-        precision = significantDigits - (int(math.floor(math.log10(math.fabs(number))))+1)
-    if precision<0:
-        precision=0
+        degree_var = degree(precision)
+    
+    precision = float(precision) / (1000.0 ** degree_var)
+    number = float(number) / (1000.0 ** degree_var)
 
-    return "{1:.{0:d}f} {2:s}{3:s}".format(precision, number, prefix(degree_var), unit)
+    if precision == 0:
+        return "{:.0f} {:s}{:s}".format(
+                number,
+                prefix(degree_var),
+                unit)
+    else:
+        return "({1:.{0:d}f} ± {2:.{0:d}f}) {3:s}{4:s}".format(
+                significantDigits,
+                number,
+                precision,
+                prefix(degree_var),
+                unit)
 
 def formatSeconds(seconds):
     totalSeconds=seconds;
@@ -485,141 +681,238 @@ def formatSeconds(seconds):
     return output
 
 def measurement(port):
-    input("*** Setup your measurement and press enter when ready ***")
+    measurement_type = -1
+    while measurement_type<0 or measurement_type>5:
+        print(" (a) single")
+        print(" (b) first + second")
+        print(" (c) first - second")
+        print(" (d) first * second")
+        print(" (e) first / second")
+        print(" (f) quit")
+        measurement_type = input("What type of measurement will this be? ")
+        measurement_type = ord(measurement_type[0])-ord('a')
 
-    print("Downloading measurement metadata from ScopeMeter...", end="", flush=True)
-    sendCommand(port, "QM")
+    if measurement_type == 5:
+        return None
 
-    types = [
-            None,
-            "Mean",
-            "RMS",
-            "True RMS",
-            "Peak to Peak",
-            "Peak Maximum",
-            "Peak Minimum",
-            "Crest Factor",
-            "Period",
-            "Duty Cycle Negative",
-            "Duty Cycle Positive",
-            "Frequency",
-            "Pulse Width Negative",
-            "Pulse Width Positive",
-            "Phase",
-            "Diode",
-            "Continuity",
-            None,
-            "Reactive Power",
-            "Apparent Power",
-            "Real Power",
-            "Harmonic Reactive Power",
-            "Harmonic Apparent Power",
-            "Harmonic Real Power",
-            "Harmonic RMS",
-            "Displacement Power Factor",
-            "Total Power Factor",
-            "Total Harmonic Distortion",
-            "Total Harmonic Distortion with respect to Fundamental",
-            "K Factor (European)",
-            "K Factor (US)",
-            "Line Frequency",
-            "Vac PWM or Vac+dc PWM",
-            "Rise Time",
-            "Fall Time"]
+    measurement_count = 1
+    if measurement_type != 0:
+        measurement_count = 2
 
-    nos = {
-            11: "Reading 1",
-            21: "Reading 2",
-            31: "Reading 3",
-            41: "Reading 4",
-            61: "Cursor 1 Amplitude",
-            62: "Cursor Relative Amplitude",
-            71: "Cursor 2 Amplitude",
-            72: "Cursor Relative Time",
-            73: "Cursor Maximum Amplitude",
-            74: "Cursor Average Amplitude",
-            75: "Cursor Minimum Amplitude",
-            76: "Cursors Frequency"}
-
-    sources = {
-            1: "Input A",
-            2: "Input B",
-            3: "Input C",
-            4: "Input D",
-            5: "External Input",
-            12: "Input A vs Input B",
-            21: "Input B vs Input A"}
-
-    class reading_t:
-        no = 0
-        valid = False
-        source = 0
-        unit = 0
-        thetype = 0
-        pres = 0
-        resolution = 0.0
-
-    readings = []
-    separator = ord(',')
-
-    while separator == ord(','):
-        reading = reading_t()
-        reading.no = getDecimal(port, ',')
-        if getDecimal(port, ',') == 1:
-            reading.valid = True
-        reading.source = getDecimal(port, ',')
-        reading.unit = getDecimal(port, ',')
-        reading.thetype = getDecimal(port, ',')
-        reading.pres = getDecimal(port, ',')
-        
-        mantissa = getDecimal(port, 'E')
-        exponent, separator = getDecimal(port)
-        reading.resolution = mantissa * 10.0**exponent
-
-        if reading.valid:
-            readings.append(reading)
-    print("done\n")
-
-    letter = ord('a')
-    for reading in readings:
-        print(" ({}) {}".format(chr(letter), nos[reading.no]))
-        print("     Source: {}".format(sources[reading.source]))
-        print("       Type: {}".format(types[reading.thetype]))
-        print("       Unit: {}".format(units[reading.unit]))
-        print("  Precision: {}".format(si(
-            reading.resolution,
-            3,
-            units[reading.unit])))
-        letter += 1
-    desired = input("Enter desired measurements (a) and hit enter: ")
-    desired = desired.lower()
-    desired = desired[0]
-
-    if ord('a') > ord(desired) or ord(desired) >= ord('a')+len(readings):
-        print("error: answer is out of range")
-        exit(1)
-
-    reading = readings[ord(desired)-ord('a')]
     measurement = measurement_t()
-    measurement.source = sources[reading.source]
-    measurement.unit = units[reading.unit]
-    measurement.precision = reading.resolution
+    first = measurement_t()
 
-    print("Fetching measurement from ScopeMeter...", end="", flush=True)
-    sendCommand(port, "QM {:d}".format(reading.no))
-    measurement.value = getDecimal(port, 'E') * 10.0**getDecimal(port, '\r')
-    print("done")
+    for measurement_number in range(measurement_count):
+        print("Setup your ", end="")
+        if measurement_count != 1:
+            if measurement_number == 0:
+                print("first ", end="")
+            else:
+                print("second ", end="")
+        input("measurement and press enter when ready")
 
-    if measurement.value == 0:
-        measurement.sigdigs = 1
-    else:
-        measurement.sigdigs = math.ceil(
-                math.ceil(math.log10(measurement.value))
-                -math.log10(reading.resolution))\
-                +1
-    print("Result: {} ± {}".format(
-        si(measurement.value, measurement.sigdigs, measurement.unit),
-        si(measurement.precision, 3, measurement.unit)))
+        print(
+                "Downloading measurement metadata from ScopeMeter...",
+                end="",
+                flush=True)
+        sendCommand(port, "QM")
+
+        types = [
+                None,
+                "Mean",
+                "RMS",
+                "True RMS",
+                "Peak to Peak",
+                "Peak Maximum",
+                "Peak Minimum",
+                "Crest Factor",
+                "Period",
+                "Duty Cycle Negative",
+                "Duty Cycle Positive",
+                "Frequency",
+                "Pulse Width Negative",
+                "Pulse Width Positive",
+                "Phase",
+                "Diode",
+                "Continuity",
+                None,
+                "Reactive Power",
+                "Apparent Power",
+                "Real Power",
+                "Harmonic Reactive Power",
+                "Harmonic Apparent Power",
+                "Harmonic Real Power",
+                "Harmonic RMS",
+                "Displacement Power Factor",
+                "Total Power Factor",
+                "Total Harmonic Distortion",
+                "Total Harmonic Distortion with respect to Fundamental",
+                "K Factor (European)",
+                "K Factor (US)",
+                "Line Frequency",
+                "Vac PWM or Vac+dc PWM",
+                "Rise Time",
+                "Fall Time"]
+
+        nos = {
+                11: "Reading 1",
+                21: "Reading 2",
+                31: "Cursor 1 Amplitude",
+                41: "Cursor 2 Amplitude",
+                53: "Cursor Maximum Amplitude",
+                54: "Cursor Average Amplitude",
+                55: "Cursor Minimum Amplitude",
+                61: "Cursor Relative Amplitude",
+                71: "Cursor Relative Time"}
+
+        sources = {
+                1: "Input A",
+                2: "Input B",
+                3: "Input C",
+                4: "Input D",
+                5: "External Input",
+                12: "Input A vs Input B",
+                21: "Input B vs Input A"}
+
+        class reading_t:
+            no = 0
+            valid = False
+            source = 0
+            unit = 0
+            thetype = 0
+            pres = 0
+            resolution = 0.0
+
+        readings = []
+        separator = ord(',')
+
+        while separator == ord(','):
+            reading = reading_t()
+            reading.no = getDecimal(port, ',')
+            if getDecimal(port, ',') == 1:
+                reading.valid = True
+            reading.source = getDecimal(port, ',')
+            reading.unit = getDecimal(port, ',')
+            reading.thetype = getDecimal(port, ',')
+            reading.pres = getDecimal(port, ',')
+            
+            mantissa = getDecimal(port, 'E')
+            exponent, separator = getDecimal(port)
+            reading.resolution = mantissa * 10.0**exponent
+
+            if reading.valid:
+                readings.append(reading)
+        print("done")
+
+        letter = ord('a')
+        for reading in readings:
+            print(" ({}) {}:".format(chr(letter), nos[reading.no]))
+            print("          Source: {}".format(sources[reading.source]))
+            print("            Type: {}".format(types[reading.thetype]))
+            print("            Unit: {}".format(units[reading.unit]))
+            print("       Precision: {}".format(si(
+                reading.resolution,
+                0,
+                units[reading.unit])))
+            letter += 1
+        desired = input("Enter desired reading and hit enter: ")
+        desired = desired.lower()
+        desired = desired[0]
+
+        if ord('a') > ord(desired) or ord(desired) >= ord('a')+len(readings):
+            print("error: answer is out of range")
+            exit(1)
+
+        reading = readings[ord(desired)-ord('a')]
+        measurement.source = sources[reading.source]
+        measurement.unit = units[reading.unit]
+        measurement.precision = reading.resolution
+
+        print("Fetching reading from ScopeMeter...", end="", flush=True)
+        sendCommand(port, "QM {:d}".format(reading.no))
+        measurement.value = getDecimal(port, 'E') * 10.0**getDecimal(port, '\r')
+        print("done")
+
+        print("Result: {}".format(
+            si(measurement.value, measurement.precision, measurement.unit)))
+        if measurement_number == 0:
+            first = copy.deepcopy(measurement)
+
+    if measurement_type != 0:
+        if measurement_type < 3:
+            if measurement_type == 1:
+                measurement.value = first.value + measurement.value
+            elif measurement_type == 2:
+                measurement.value = first.value - measurement.value
+            measurement.precision = first.precision + measurement.precision
+            if measurement.unit != first.unit:
+                print("error: units for first and second measurements differ")
+                exit(1)
+        else:
+            value = 0.0
+            if measurement_type == 3:
+                value = first.value * measurement.value
+                if first.unit == measurement.unit:
+                    measurement.unit += '²'
+                else:
+                    measurement.unit = first.unit + measurement.unit
+            elif measurement_type == 4:
+                value = first.value / measurement.value
+                if first.unit == measurement.unit:
+                    measurement.unit = '%'
+                else:
+                    measurement.unit = first.unit + '/' + measurement.unit
+            measurement.precision = value * (
+                    measurement.precision/measurement.value
+                    + first.precision/first.value)
+            measurement.value = value
+            if measurement.unit == '%':
+                measurement.value *= 100
+                measurement.precision *= 100
+
+
+
+        print("Final Result: {}".format(
+            si(measurement.value, measurement.precision, measurement.unit)))
+
+    measurement.name = input("Enter title (empty to discard): ")
+
+    return measurement
+
+def measurements(port):
+    print("\n***** Starting Measurements *****\n")
+
+    measurements = []
+    names = []
+    nameLength = 0
+    values = []
+    valueLength = 0
+
+    while True:
+        print("\n***** Doing Measurement #{:d} *****\n".format(
+            len(measurements)+1))
+        x = measurement(port)
+        if x == None:
+            break
+        if len(x.name):
+            measurements.append(x)
+        names.append(x.name)
+        nameLength = max(nameLength, len(x.name))
+        values.append(si(x.value, x.precision, x.unit))
+        valueLength = max(valueLength, len(values[-1]))
+
+    print("\nDone measurements. Here they are:")
+
+    print("┌{1:─<{0:d}}┬{3:─<{2:d}}┐".format(nameLength, "", valueLength, ""))
+    for i in range(len(measurements)):
+        print("│{1: >{0:d}}│{3: <{2:d}}│".format(
+            nameLength,
+            names[i],
+            valueLength,
+            values[i]))
+    print("└{1:─<{0:d}}┴{3:─<{2:d}}┘".format(nameLength, "", valueLength, ""))
+
+    return measurements
 
 def execute(arguments, port):
     if arguments.identify:
@@ -632,59 +925,10 @@ def execute(arguments, port):
         screenshot(port)
 
     if arguments.waveform != None:
-        waveforms = []
-        for i in arguments.waveform:
-            i = i.split('_')
-            channel = i[0]
-            trace_type = i[1].title()
-            source = ""
-            
-            if channel == 'A':
-                source = "1"
-            elif channel == 'B':
-                source = "2"
-
-            if trace_type == 'Trace':
-                source += '0'
-            elif trace_type == 'Envelope':
-                source += '2'
-            elif trace_type == 'Trend':
-                source += '1'
-
-            data = waveform(port, source)
-            data.channel = channel
-            if trace_type == "Trace" and data.samples.shape[1] == 2:
-                matching = True
-                for i in data.samples:
-                    if i[0] != i[1]:
-                        matching = False
-                        break
-                if matching:
-                    data.samples = numpy.resize(
-                            data.samples,
-                            (data.samples.shape[0], 1))
-                    data.trace_type = "Average"
-                else:
-                    data.trace_type = "Glitch"
-            else:
-                data.trace_type = trace_type
-            waveforms.append(data)
-
-            filename=data.timestamp.strftime("%Y-%m-%d-%H-%M-%S") \
-                    + "_input-" + data.channel \
-                    + "_" + data.trace_type.lower() \
-                    + "_" + data.x_unit + "-vs-" + data.y_unit \
-                    + ".dat"
-            datFile = open(filename, 'w')
-            for i in range(data.samples.shape[0]):
-                datFile.write("{:.5e}".format(data.x_zero+i*data.delta_x))
-                for j in range(data.samples.shape[1]):
-                    datFile.write(" {:.5e}".format(data.samples[i][j]))
-                datFile.write("\n")
-            datFile.close()
+        waves = waveforms(port)
 
     if arguments.measurement:
-        measurement(port)
+        measurements(port)
 
 arguments = processArguments()
 port = initializePort(arguments.port)
