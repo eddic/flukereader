@@ -1059,11 +1059,11 @@ def tex(figs):
                     set xlabel "Time (${:s}$)"
                     set xrange [{:e}:{:e}]
                     set xtics {:e}
-                    set xzeroaxis lt 4 lc rgb 'black'
+                    set xzeroaxis lt 1 lc rgb 'green'
                     set format x ''
                     set yrange [{:e}:{:e}]
                     set ytics {:e}
-                    set yzeroaxis lt 4 lc rgb 'black'
+                    set yzeroaxis lt 1 lc rgb 'green'
                     set format y ''
                     set grid
                     set parametric
@@ -1173,6 +1173,209 @@ def tex(figs):
     texFile.close()
     os.chdir("..")
 
+def html(figs):
+    try:
+        os.mkdir("html")
+    except OSError:
+        pass
+    os.chdir("html")
+
+    makefile = open("Makefile", 'w')
+    figFiles = []
+
+    htmlFile = open("report.html", 'w')
+    htmlFile.write(textwrap.dedent('''\
+            <!DOCTYPE html>
+            <html lang="en-ca">\
+            <head>\
+            <meta http-equiv="Content-Type" content="text/html;charset=utf-8" />
+		    <meta charset="utf-8" />\
+            </head><body>
+            '''))
+
+    figNum = 1
+
+    for fig in figs:
+        datFiles = []
+        for waveform in fig.waveforms:
+            datFiles.append("../"+waveform.filename+'.dat')
+        makefile.write(textwrap.dedent('''\
+        {0:s}.svg: {0:s}.gpi {1:s}
+        \tgnuplot {0:s}.gpi
+
+        '''.format(fig.filename, " ".join(datFiles))))
+        figFiles.append(fig.filename  +'.svg')
+
+        plotFile = open(fig.filename+".gpi", 'w')
+        plotFile.write(textwrap.dedent('''\
+                set term svg enhanced size 608,430 font "Serif"
+                set output '{:s}.svg'
+                set encoding utf8
+        '''.format(fig.filename)))
+        if(fig.waveforms[0].x_unit == 'Hz'):
+            x_min = 10.0**(math.log10(
+                            fig.waveforms[0].x_zero
+                            +fig.waveforms[0].delta_x
+                            *fig.waveforms[0].samples.shape[0]
+                        )-3)
+            x_max = fig.waveforms[0].x_zero \
+                    +fig.waveforms[0].delta_x \
+                    *fig.waveforms[0].samples.shape[0]
+            plotFile.write(textwrap.dedent('''\
+                    set xlabel "Frequency (Hz)"
+                    set ylabel "Spectral Density ({:s})"
+                    set logscale x
+                    set grid
+                    set grid mxtics
+                    set xtics format "10^{{%L}}"
+                    unset key
+                    set parametric
+                    set xrange [{:e}:{:e}]
+                    plot '../{:s}.dat' using 1:2 with lines lt 1 lc rgb 'black'
+                    '''.format(
+                        fig.waveforms[0].y_unit,
+                        x_min,
+                        x_max,
+                        fig.waveforms[0].filename)))
+        else:
+            x_scale = si(
+                fig.waveforms[0].x_scale,
+                0,
+                fig.waveforms[0].x_unit+'/div')
+            y_scale = [si(
+                fig.waveforms[0].y_scale,
+                0,
+                fig.waveforms[0].y_unit+'/div')]
+            plotFile.write(textwrap.dedent('''\
+                    set xlabel "Time ({:s})"
+                    set xrange [{:e}:{:e}]
+                    set xtics {:e}
+                    set xzeroaxis lt 1 lc rgb 'green'
+                    set format x ''
+                    set yrange [{:e}:{:e}]
+                    set ytics {:e}
+                    set yzeroaxis lt 1 lc rgb 'green'
+                    set format y ''
+                    set grid
+                    set parametric
+                    unset key
+                    '''.format(
+                        x_scale,
+                        fig.waveforms[0].x_zero,
+                        fig.waveforms[0].x_zero
+                            +fig.waveforms[0].x_divisions
+                            *fig.waveforms[0].x_scale,
+                        fig.waveforms[0].x_scale,
+                        fig.waveforms[0].y_at_0,
+                        fig.waveforms[0].y_at_0
+                            +fig.waveforms[0].y_divisions
+                            *fig.waveforms[0].y_scale,
+                        fig.waveforms[0].y_scale)))
+            if len(fig.waveforms) == 1:
+                plotFile.write(textwrap.dedent('''\
+                        set ylabel "{:s} ({:s})"
+                        '''.format(
+                            fig.waveforms[0].title,
+                            y_scale[0])))
+                if fig.waveforms[0].samples.shape[1]==1:
+                    plotFile.write(textwrap.dedent('''\
+                            plot '../{:s}.dat' using 1:2 with lines lt 1 lc rgb 'black'
+                            '''.format(fig.waveforms[0].filename)))
+                else:
+                    plotFile.write(textwrap.dedent('''\
+                            plot '../{:s}.dat' using 1:2:3 with filledcurves fc rgb 'black'
+                            '''.format(fig.waveforms[0].filename)))
+            else:
+                scalers = [1, fig.waveforms[0].y_scale/fig.waveforms[1].y_scale]
+                y_scale.append(si(
+                    fig.waveforms[1].y_scale,
+                    0,
+                    fig.waveforms[1].y_unit+'/div'))
+                wavs = []
+                colors = ['red', 'blue']
+                for i in range(2):
+                    if fig.waveforms[i].samples.shape[1]==1:
+                        wavs.append("'../{:s}.dat' using ($1):($2*{:e}) with lines lt 1 lc rgb '{:s}' title '{:s} ({:s})'".format(
+                            fig.waveforms[i].filename,
+                            scalers[i],
+                            colors[i],
+                            fig.waveforms[i].title,
+                            y_scale[i]))
+                    else:
+                        wavs.append("'../{0:s}.dat' using ($1):($2*{1:e}):($3*{1:e}) with filledcurves fc rgb '{2:s}' title '{3:s} ({4:s})'".format(
+                            fig.waveforms[i].filename,
+                            scalers[i],
+                            colors[i],
+                            fig.waveforms[i].title,
+                            y_scale[i]))
+                plotFile.write(textwrap.dedent('''\
+                        set key right top spacing 2
+                        set ylabel "Amplitude"
+                        plot {:s}
+                        '''.format(", ".join(wavs))))
+
+        plotFile.close()
+        htmlFile.write(textwrap.dedent('''\
+            <figure id="fig{:d}">\
+            <img src="{:s}.svg" height="456" width="608" />\
+            <table>'''.format(
+                figNum,
+                fig.filename)))
+        htmlFile.write(textwrap.dedent('''\
+                <tr>\
+                <td style="text-align: right">Aquisition Time</td>\
+                <td style="text-align: left">{:s}</td>\
+                </tr>\
+                '''.format(
+                    fig.waveforms[0].timestamp.strftime("%B %d, %Y at %H:%M:%S")
+                    )))
+        if fig.waveforms[0].x_unit == 'Hz':
+            htmlFile.write(textwrap.dedent('''\
+                    <tr>\
+                    <td style="text-align: right">Window Type</td>\
+                    <td style="text-align: left">{:s}</td>\
+                    </tr>\
+                    <tr>\
+                    <td style="text-align: right">Windows Size</td>\
+                    <td style="text-align: left">{:d}</td>\
+                    </tr>\
+                    '''.format(
+                        fig.waveforms[0].window_type,
+                        fig.waveforms[0].window_size)))
+
+        for measurement in fig.measurements:
+            htmlFile.write(textwrap.dedent('''\
+                    <tr>\
+                    <td style="text-align: right">{:s}</td>\
+                    <td style="text-align: left">{:s}</td>\
+                    </tr>\
+                    '''.format(
+                        measurement.name,
+                        si(
+                            measurement.value,
+                            measurement.precision,
+                            measurement.unit))))
+
+        htmlFile.write(textwrap.dedent('''\
+            </table>\
+            <figcaption>Figure {:d}: {:s}</figcaption>\
+            </figure>
+            '''.format(figNum, fig.title)))
+
+        figNum += 1
+
+    makefile.write(textwrap.dedent('''\
+    all: {:s}
+
+    clean:
+    \trm -f *.svg
+    '''.format(" ".join(figFiles))))
+    makefile.close()
+
+    htmlFile.write("</body></html>")
+    htmlFile.close()
+    os.chdir("..")
+
 def execute(arguments, port):
     if arguments.identify:
         identify(port)
@@ -1187,6 +1390,8 @@ def execute(arguments, port):
         figs = figures(port)
         if arguments.tex:
             tex(figs)
+        if arguments.html:
+            html(figs)
 
 arguments = processArguments()
 port = initializePort(arguments.port)
