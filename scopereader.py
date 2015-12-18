@@ -1,6 +1,6 @@
 #! /usr/bin/env python3
 
-import argparse, serial, time, datetime, scipy.signal, numpy, math, copy, textwrap
+import argparse, serial, time, datetime, scipy.signal, numpy, math, copy, textwrap, os
 
 def processArguments():
     parser = argparse.ArgumentParser(description='Talk to a Fluke ScopeMeter.')
@@ -30,15 +30,16 @@ def processArguments():
             help='get a screenshot from the ScopeMeter')
 
     parser.add_argument(
-            '-m',
-            '--measurement',
+            '-t',
+            '--tex',
             action='store_true',
-            help='get a measurement from the ScopeMeter')
+            help='Generate a tex report of results')
 
     parser.add_argument(
-            '-w', '--waveform',
+            '-l',
+            '--html',
             action='store_true',
-            help='capture waveform data')
+            help='Generate an html report of results')
 
     arguments = parser.parse_args()
     return arguments
@@ -582,9 +583,10 @@ def waveforms(port):
                         matching = False
                         break
                 if matching:
-                    data.samples = numpy.resize(
-                            data.samples,
-                            (data.samples.shape[0], 1))
+                    samples = numpy.empty([data.samples.shape[0], 1])
+                    for i in range(samples.shape[0]):
+                        samples[i][0] = data.samples[i][0]
+                    data.samples = samples
                     data.trace_type = "average"
                 else:
                     data.trace_type = "glitch"
@@ -641,14 +643,18 @@ def waveforms(port):
         x = numpy.empty(waveforms[0].samples.shape[0])
         for i in range(x.shape[0]):
             x[i] = waveforms[0].samples[i][0]
+        segsize = int(min(int(2**math.floor(math.log2(len(x)))), 2048))
         frequency, power = scipy.signal.welch(
                 x = x,
                 fs = 1.0/waveforms[0].delta_x,
                 window = "hamming",
-                nperseg = 1024,
+                nperseg = segsize,
+                noverlap = 3*segsize/4,
                 return_onesided = True)
         
         data = waveform_t()
+        data.window_type = "hamming"
+        data.window_size = segsize
         data.trace_type = 'psd'
         if waveforms[0].y_unit == 'W':
             data.y_unit = 'dBW/Hz'
@@ -971,8 +977,12 @@ def figures(port):
             figures.append(fig)
     return figures
 
-def report(port):
-    figs = figures(port)
+def tex(figs):
+    try:
+        os.mkdir("tex")
+    except OSError:
+        pass
+    os.chdir("tex")
 
     makefile = open("Makefile", 'w')
     makefile.write(textwrap.dedent('''\
@@ -998,7 +1008,7 @@ def report(port):
     for fig in figs:
         datFiles = []
         for waveform in fig.waveforms:
-            datFiles.append(waveform.filename+'.dat')
+            datFiles.append("../"+waveform.filename+'.dat')
         makefile.write(textwrap.dedent('''\
         {0:s}.tex: {0:s}.gpi {1:s}
         \tgnuplot {0:s}.gpi
@@ -1012,15 +1022,14 @@ def report(port):
                 set output '{:s}.tex'
         '''.format(fig.filename)))
         if(fig.waveforms[0].x_unit == 'Hz'):
-            x_min = int(10**(math.ceil(math.log10(
+            x_min = 10.0**(math.log10(
                             fig.waveforms[0].x_zero
                             +fig.waveforms[0].delta_x
                             *fig.waveforms[0].samples.shape[0]
-                        ))-4))
-            x_max = int(10**(math.ceil(math.log10(
-                            fig.waveforms[0].x_zero
-                            +fig.waveforms[0].delta_x
-                            *fig.waveforms[0].samples.shape[0]))))
+                        )-3)
+            x_max = fig.waveforms[0].x_zero \
+                    +fig.waveforms[0].delta_x \
+                    *fig.waveforms[0].samples.shape[0]
             plotFile.write(textwrap.dedent('''\
                     set xlabel "Frequency (Hz)"
                     set ylabel "Spectral Density (${:s}$)"
@@ -1030,7 +1039,8 @@ def report(port):
                     set xtics format "$10^{{%L}}$"
                     unset key
                     set parametric
-                    plot [{:d}:{:d}] '{:s}.dat' using 1:2 with lines lt 1 lc rgb 'black'
+                    set xrange [{:e}:{:e}]
+                    plot '../{:s}.dat' using 1:2 with lines lt 1 lc rgb 'black'
                     '''.format(
                         texify(fig.waveforms[0].y_unit).replace("\\", "\\\\"),
                         x_min,
@@ -1078,11 +1088,11 @@ def report(port):
                             y_scale[0].replace("\\", "\\\\"))))
                 if fig.waveforms[0].samples.shape[1]==1:
                     plotFile.write(textwrap.dedent('''\
-                            plot '{:s}.dat' using 1:2 with lines lt 1 lc rgb 'black'
+                            plot '../{:s}.dat' using 1:2 with lines lt 1 lc rgb 'black'
                             '''.format(fig.waveforms[0].filename)))
                 else:
                     plotFile.write(textwrap.dedent('''\
-                            plot '{:s}.dat' using 1:2:3 with filledcurves fc rgb 'black'
+                            plot '../{:s}.dat' using 1:2:3 with filledcurves fc rgb 'black'
                             '''.format(fig.waveforms[0].filename)))
             else:
                 scalers = [1, fig.waveforms[0].y_scale/fig.waveforms[1].y_scale]
@@ -1094,14 +1104,14 @@ def report(port):
                 colors = ['red', 'blue']
                 for i in range(2):
                     if fig.waveforms[i].samples.shape[1]==1:
-                        wavs.append("'{:s}.dat' using ($1):($2*{:e}) with lines lt 1 lc rgb '{:s}' title '{:s} (${:s}$)'".format(
+                        wavs.append("'../{:s}.dat' using ($1):($2*{:e}) with lines lt 1 lc rgb '{:s}' title '{:s} (${:s}$)'".format(
                             fig.waveforms[i].filename,
                             scalers[i],
                             colors[i],
                             fig.waveforms[i].title,
                             y_scale[i]))
                     else:
-                        wavs.append("'{0:s}.dat' using ($1):($2*{1:e}):($3*{1:e}) with filledcurves fc rgb '{2:s}' title '{3:s} (${4:s}$)'".format(
+                        wavs.append("'../{0:s}.dat' using ($1):($2*{1:e}):($3*{1:e}) with filledcurves fc rgb '{2:s}' title '{3:s} (${4:s}$)'".format(
                             fig.waveforms[i].filename,
                             scalers[i],
                             colors[i],
@@ -1120,6 +1130,19 @@ def report(port):
                 \begin{tabular}{ | r | l | }
                     \hline
         '''))
+        texFile.write(r"            Aquisition Time & "
+                + fig.waveforms[0].timestamp.strftime("%B %d, %Y at %H:%M:%S")
+                + " \\\\\n")
+        if fig.waveforms[0].x_unit == 'Hz':
+            texFile.write(
+                    r"            Window Type & "
+                    + fig.waveforms[0].window_type
+                    + " \\\\\n"
+                    + "            Window Size & {:d}".format(
+                        fig.waveforms[0].window_size)
+                    + " \\\\\n"
+                    )
+
         for measurement in fig.measurements:
             texFile.write(
                     r"            "
@@ -1129,7 +1152,7 @@ def report(port):
                         measurement.value,
                         measurement.precision,
                         measurement.unit))
-                    + '$ \\\\ \n')
+                    + '$ \\\\\n')
         texFile.write(r'''            \hline
         \end{tabular}
         \caption{'''+fig.title+textwrap.dedent(r'''        }
@@ -1142,12 +1165,13 @@ def report(port):
     \ttexi2pdf report.tex
 
     clean:
-    \trm -f {0:s} *.log *.pdf *.aux
+    \trm -f {0:s} *.log report.pdf *.aux
     '''.format(" ".join(figFiles))))
     makefile.close()
 
     texFile.write(r"\end{document}")
     texFile.close()
+    os.chdir("..")
 
 def execute(arguments, port):
     if arguments.identify:
@@ -1159,7 +1183,10 @@ def execute(arguments, port):
     if arguments.screenshot:
         screenshot(port)
 
-    report(port)
+    if arguments.tex or arguments.html:
+        figs = figures(port)
+        if arguments.tex:
+            tex(figs)
 
 arguments = processArguments()
 port = initializePort(arguments.port)
